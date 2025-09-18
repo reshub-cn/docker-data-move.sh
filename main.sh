@@ -1,27 +1,26 @@
 #!/bin/bash
-# ==========================================================
-# Docker 数据迁移脚本（通用版，含严格检测）
+# Docker 数据迁移脚本（通用版，支持 CentOS7/8/9, Debian/Ubuntu, Alpine）
 # 用法: sudo ./docker-move.sh /data1/docker
 #
-# 项目主页: https://github.com/reshub-cn/docker-data-move.sh
-# 官网: https://www.reshub.cn
-# ==========================================================
-
+# 来源 (GitHub): https://github.com/reshub-cn/docker-data-move.sh
+# 网站: https://www.reshub.cn
+# 作者: reshub-cn
+# 用法: sudo ./docker-move.sh /data1/docker
 set -euo pipefail
-
 
 NEW_PATH=${1:-}
 DOCKER_SERVICE="docker"
 DOCKER_DIR="/var/lib/docker"
 CONFIG_FILE="/etc/docker/daemon.json"
 
-# 允许迁移到非空目录（默认 0=不允许）。需要时可临时：ALLOW_NONEMPTY=1 sudo ./docker-move.sh /path
+# 允许迁移到非空目录（默认 0=不允许）。需要时可临时：
+#   ALLOW_NONEMPTY=1 sudo ./docker-move.sh /path
 ALLOW_NONEMPTY="${ALLOW_NONEMPTY:-0}"
 
-# ----------- 通用输出/失败处理 -----------
-die() { echo -e "\n[ERROR] $*\n" >&2; exit 1; }
-info(){ echo "[INFO]  $*"; }
-warn(){ echo "[WARN]  $*"; }
+# ----------- 输出函数 -----------
+die()  { echo -e "\n[ERROR] $*\n" >&2; exit 1; }
+info() { echo "[INFO]  $*"; }
+warn() { echo "[WARN]  $*"; }
 
 # ----------- 检测函数 -----------
 require_root() {
@@ -33,7 +32,6 @@ require_new_path() {
   [[ "$NEW_PATH" == /* ]] || die "新目录必须使用绝对路径：$NEW_PATH"
   [[ -d "$DOCKER_DIR" ]] || die "旧目录不存在：$DOCKER_DIR，未检测到常规 Docker 安装。"
 
-  # 不允许相同或互相包含，防止递归/覆盖
   if [[ "$NEW_PATH" == "$DOCKER_DIR" ]]; then
     die "新目录不能与当前目录相同：$NEW_PATH"
   fi
@@ -44,9 +42,9 @@ require_new_path() {
     die "旧目录不能位于新目录内部：$DOCKER_DIR 在 $NEW_PATH 内"
   fi
 
-  # 新目录存在性与是否空目录
   mkdir -p "$NEW_PATH" || die "无法创建新目录：$NEW_PATH"
   chown root:root "$NEW_PATH" || die "无法设置新目录属主：$NEW_PATH"
+
   if [[ "$ALLOW_NONEMPTY" != "1" ]]; then
     if [[ -d "$NEW_PATH" ]] && [[ -n "$(ls -A "$NEW_PATH" 2>/dev/null || true)" ]]; then
       die "新目录必须为空（或设置 ALLOW_NONEMPTY=1 跳过）：$NEW_PATH"
@@ -56,6 +54,7 @@ require_new_path() {
 
 require_cmds() {
   command -v docker >/dev/null 2>&1 || die "未找到 docker 命令，请先安装 Docker。"
+
   if ! command -v rsync >/dev/null 2>&1; then
     warn "未找到 rsync，尝试安装..."
     if [[ -f /etc/debian_version ]]; then
@@ -70,27 +69,23 @@ require_cmds() {
 }
 
 check_space() {
-  # 计算旧目录占用（字节）
   local used avail need parent
   used=$(du -sb "$DOCKER_DIR" 2>/dev/null | awk '{print $1}')
   [[ -n "$used" && "$used" -gt 0 ]] || die "无法获取 $DOCKER_DIR 占用空间。"
 
-  # 目标路径未挂载时，df 也会找其所在分区
   parent="$NEW_PATH"
   [[ -d "$parent" ]] || parent="$(dirname "$NEW_PATH")"
 
   avail=$(df -P -B1 "$parent" 2>/dev/null | awk 'NR==2{print $4}')
   [[ -n "$avail" && "$avail" -gt 0 ]] || die "无法获取 $parent 所在分区可用空间。"
 
-  # 需要空间 = max(used*1.10, used+2GiB)
-  local need1 need2 GiB2
-  GiB2=$((2*1024*1024*1024))
-  need1=$(( (used * 110 + 99) / 100 ))   # 向上取整 110%
-  need2=$(( used + GiB2 ))
+  local GiB2=$((2*1024*1024*1024))
+  local need1=$(( (used * 110 + 99) / 100 ))
+  local need2=$(( used + GiB2 ))
   need=$(( need1 > need2 ? need1 : need2 ))
 
   info "旧目录占用：$used 字节；目标可用：$avail 字节；需要至少：$need 字节"
-  [[ "$avail" -ge "$need" ]] || die "目标磁盘空间不足（需要：$need，可用：$avail）。请更换更大的磁盘/路径。"
+  [[ "$avail" -ge "$need" ]] || die "目标磁盘空间不足（需要：$need，可用：$avail）。"
 }
 
 check_selinux() {
@@ -98,12 +93,14 @@ check_selinux() {
     local mode
     mode=$(getenforce 2>/dev/null || echo "")
     if [[ "$mode" == "Enforcing" ]]; then
-      cat >&2 <<'EOF'
+      cat >&2 <<EOF
 
-[ERROR] 检测到 SELinux 处于 Enforcing。为避免迁移后 Docker 无法读写新目录，请先为新目录添加正确标签：
-  semanage fcontext -a -t container_var_lib_t "/新路径(/.*)?"
-  restorecon -Rv /新路径
-或临时将 SELinux 调整为 Permissive 后再执行。处理完毕后重试本脚本。
+[ERROR] 检测到 SELinux 处于 Enforcing。
+请为新目录添加正确标签：
+  semanage fcontext -a -t container_var_lib_t "${NEW_PATH}(/.*)?"
+  restorecon -Rv ${NEW_PATH}
+或临时将 SELinux 设置为 Permissive：
+  setenforce 0
 
 EOF
       exit 1
@@ -113,12 +110,11 @@ EOF
 
 check_daemon_json() {
   if [[ -f "$CONFIG_FILE" ]]; then
-    # 如安装了 jq，校验 JSON；非法则备份并退出
     if command -v jq >/dev/null 2>&1; then
       if ! jq -e '.' "$CONFIG_FILE" >/dev/null 2>&1; then
         local bak="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
         cp -a "$CONFIG_FILE" "$bak" || true
-        die "检测到 $CONFIG_FILE 不是合法 JSON，已备份到：$bak，请修复后重试。"
+        die "检测到 $CONFIG_FILE 不是合法 JSON，已备份到：$bak"
       fi
     else
       warn "未安装 jq，无法校验 $CONFIG_FILE 的 JSON 合法性。"
@@ -137,7 +133,7 @@ preflight_checks() {
   info "预检通过 ✅"
 }
 
-# ----------- 停止/启动 Docker 的函数（原样保留） -----------
+# ----------- 控制 Docker -----------
 stop_docker() {
   if command -v systemctl &>/dev/null; then
     systemctl stop "$DOCKER_SERVICE" || true
@@ -160,17 +156,18 @@ start_docker() {
   fi
 }
 
-
 # ----------- 主流程 -----------
 echo "开始迁移 Docker 数据目录到: $NEW_PATH"
 
-# 自动安装 jq（保持你原有逻辑）
+# 自动安装 jq（CentOS7 修复）
 if ! command -v jq &>/dev/null; then
   echo "jq 未安装，正在尝试安装..."
   if [[ -f /etc/debian_version ]]; then
     apt update && apt install -y jq || true
   elif [[ -f /etc/redhat-release ]]; then
-    yum install -y jq || dnf install -y jq || true
+    yum install -y epel-release || true
+    rpm --import https://archive.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-7 || true
+    yum install -y jq oniguruma || dnf install -y jq oniguruma || true
   elif [[ -f /etc/alpine-release ]]; then
     apk add --no-cache jq || true
   fi
@@ -183,21 +180,19 @@ preflight_checks
 echo "停止 Docker 服务..."
 stop_docker
 
-# 2. 再次确保新路径存在并权限正确
+# 2. 确保新路径存在
 echo "检查新目录..."
 mkdir -p "$NEW_PATH"
 chown root:root "$NEW_PATH"
 
-# 3. 迁移数据（严格失败即退出）
+# 3. 迁移数据
 echo "迁移数据..."
 rsync -aHAX --numeric-ids --delete --info=progress2 "$DOCKER_DIR/" "$NEW_PATH/"
 
-# 4. 备份旧目录（避免重复执行时报错）
+# 4. 备份旧目录
 if [[ -d "$DOCKER_DIR" ]]; then
   echo "备份旧目录..."
   mv "$DOCKER_DIR" "${DOCKER_DIR}.bak.$(date +%Y%m%d%H%M%S)"
-else
-  echo "旧目录不存在，跳过备份步骤。"
 fi
 
 # 5. 修改配置文件
@@ -205,14 +200,13 @@ echo "修改 Docker 配置..."
 mkdir -p "$(dirname "$CONFIG_FILE")"
 if [[ -f "$CONFIG_FILE" && command -v jq >/dev/null 2>&1 ]]; then
   tmp="${CONFIG_FILE}.tmp"
-  # 将 data-root 写入（保留其他字段）
-  jq '.["data-root"]="'$NEW_PATH'"' "$CONFIG_FILE" > "$tmp" 2>/dev/null || {
-    # jq 失败则回退为仅包含 data-root 的最小 JSON，但不覆盖原文件
+  # 用 --arg 确保路径安全传入
+  if ! jq --arg path "$NEW_PATH" '.["data-root"]=$path' "$CONFIG_FILE" > "$tmp" 2>/dev/null; then
     bak="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     cp -a "$CONFIG_FILE" "$bak" || true
     echo '{"data-root":"'$NEW_PATH'"}' > "$tmp"
     warn "原 $CONFIG_FILE 写入失败，已备份到 $bak，并用最小配置覆盖。"
-  }
+  fi
   mv "$tmp" "$CONFIG_FILE"
 else
   echo '{"data-root":"'$NEW_PATH'"}' > "$CONFIG_FILE"
